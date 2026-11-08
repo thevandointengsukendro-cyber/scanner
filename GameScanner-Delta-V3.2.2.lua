@@ -1446,10 +1446,8 @@ function UI:mount()
 	local function showDetails(title: string, tbl: any)
 		local ok, encoded = pcall(HttpService.JSONEncode, HttpService, safeSerialize(tbl))
 		if ok then
-			local formatted = string.gsub(encoded, ","", ",
-  "")
-			detailText.Text = "[" .. title .. "]
-" .. formatted
+		local formatted = string.gsub(encoded, ',"', ',\n  "')
+		detailText.Text = "[" .. title .. "]\n" .. formatted
 		else
 			detailText.Text = "[" .. title .. "]
 " .. tostring(tbl)
