@@ -1,8 +1,8 @@
 --!nocheck
 -- ============================================================================
--- PROJECT: GAMESCANNER DELTA V3.2 — FINAL IMPROVEMENT
+-- PROJECT: GAMESCANNER DELTA V3.2.3 — DELTA COMPATIBILITY & SYNTAX PATCH
 -- Reference Architecture: RuntimeInspector-DeepScan-v2
--- File: GameScanner-Delta-V3.2.lua (Standalone Complete Build)
+-- File: GameScanner-Delta-V3.2.3.lua (Standalone Complete Build)
 -- ============================================================================
 
 local Players = game:GetService("Players")
@@ -62,6 +62,19 @@ function CompatAdapter.getCapabilities()
 	}
 end
 
+local function canParentTo(container: Instance?): boolean
+	if not container or typeof(container) ~= "Instance" then
+		return false
+	end
+	local ok = pcall(function()
+		local probe = Instance.new("Folder")
+		probe.Name = "_GSProbe"
+		probe.Parent = container
+		probe:Destroy()
+	end)
+	return ok
+end
+
 function CompatAdapter.getGuiParent(): Instance?
 	-- Prefer PlayerGui: this is the standard client UI container and was
 	-- confirmed to work in the user's Delta UI smoke test.
@@ -74,17 +87,16 @@ function CompatAdapter.getGuiParent(): Instance?
 			end)
 			if ok then pg = result end
 		end
-		if pg and typeof(pg) == "Instance" then return pg end
+		if canParentTo(pg) then return pg end
 	end
 
-	-- Executor GUI containers are fallbacks only; merely reading CoreGui.Name
-	-- does not prove that parenting a ScreenGui there is permitted.
+	-- Executor GUI containers are fallbacks with write-access verification.
 	if Env.gethui then
 		local ok, hui = pcall(Env.gethui)
-		if ok and typeof(hui) == "Instance" then return hui end
+		if ok and canParentTo(hui) then return hui end
 	end
 	local okCore, core = pcall(function() return CoreGui end)
-	if okCore and core then return core end
+	if okCore and canParentTo(core) then return core end
 	return nil
 end
 
@@ -103,7 +115,7 @@ local function safeSerialize(val: any, depth: number?, seen: { [any]: boolean }?
 	elseif t == "string" then
 		return #val > 240 and (string.sub(val, 1, 240) .. "...[trunc]") or val
 	elseif t == "Instance" then
-		return string.format("<%s> %s", val.ClassName, safePath(val))
+		return string.format("<%s> %s", val.ClassName, safePath(inst))
 	elseif t == "Vector3" then
 		return string.format("Vector3(%.2f, %.2f, %.2f)", val.X, val.Y, val.Z)
 	elseif t == "CFrame" then
@@ -589,7 +601,8 @@ function DataModelExplorer:takeSnapshot(customLabel: string?): string
 				local okT, tags = pcall(CollectionService.GetTags, CollectionService, inst)
 				local tagSig = (okT and tags and #tags > 0) and table.concat(tags, ",") or ""
 				local valSig = ""
-				if inst:IsA("ValueBase") then
+				local okIsa, isVal = pcall(inst.IsA, inst, "ValueBase")
+				if okIsa and isVal then
 					local okV, v = pcall(function() return (inst :: any).Value end)
 					if okV then valSig = tostring(v) end
 				end
@@ -691,12 +704,15 @@ function ScriptInspector:scanScripts(onDone: (() -> ())?)
 	end
 
 	local scripts = {}
-	for _, inst in ipairs(game:GetDescendants()) do
-		local okS, isScr = pcall(function()
-			return inst:IsA("LocalScript") or inst:IsA("ModuleScript") or inst:IsA("Script")
-		end)
-		if okS and isScr then
-			table.insert(scripts, inst)
+	local okDesc, descList = pcall(game.GetDescendants, game)
+	if okDesc and descList then
+		for _, inst in ipairs(descList) do
+			local okS, isScr = pcall(function()
+				return inst:IsA("LocalScript") or inst:IsA("ModuleScript") or inst:IsA("Script")
+			end)
+			if okS and isScr then
+				table.insert(scripts, inst)
+			end
 		end
 	end
 
@@ -781,7 +797,10 @@ local ASSET_RULES = {
 }
 
 function AssetAuditor:scanAssets(onDone: (() -> ())?)
-	local all = game:GetDescendants()
+	local okDesc, all = pcall(game.GetDescendants, game)
+	if not okDesc or type(all) ~= "table" then
+		all = {}
+	end
 	table.clear(self.Items)
 	table.clear(self.CountsByCategory)
 
@@ -822,22 +841,25 @@ local NetworkMonitor = {
 
 function NetworkMonitor:scanRemotes()
 	table.clear(self.Remotes)
-	for _, inst in ipairs(game:GetDescendants()) do
-		local okN, isNet = pcall(function()
-			return inst:IsA("RemoteEvent")
-				or inst:IsA("UnreliableRemoteEvent")
-				or inst:IsA("RemoteFunction")
-				or inst:IsA("BindableEvent")
-				or inst:IsA("BindableFunction")
-		end)
-		if okN and isNet then
-			local path = safePath(inst)
-			table.insert(self.Remotes, {
-				Name = inst.Name,
-				ClassName = inst.ClassName,
-				Path = path,
-				Calls = self.Counts[path] or 0,
-			})
+	local okDesc, descList = pcall(game.GetDescendants, game)
+	if okDesc and descList then
+		for _, inst in ipairs(descList) do
+			local okN, isNet = pcall(function()
+				return inst:IsA("RemoteEvent")
+					or inst:IsA("UnreliableRemoteEvent")
+					or inst:IsA("RemoteFunction")
+					or inst:IsA("BindableEvent")
+					or inst:IsA("BindableFunction")
+			end)
+			if okN and isNet then
+				local path = safePath(inst)
+				table.insert(self.Remotes, {
+					Name = inst.Name,
+					ClassName = inst.ClassName,
+					Path = path,
+					Calls = self.Counts[path] or 0,
+				})
+			end
 		end
 	end
 	Timeline:record("NET_INVENTORY", "DataModel", string.format("Found %d Remote/Bindable objects", #self.Remotes))
@@ -901,8 +923,11 @@ function NetworkMonitor:attachListeners()
 		end
 	end
 
-	for _, inst in ipairs(game:GetDescendants()) do
-		pcall(bindOne, inst)
+	local okDesc, descList = pcall(game.GetDescendants, game)
+	if okDesc and descList then
+		for _, inst in ipairs(descList) do
+			pcall(bindOne, inst)
+		end
 	end
 	Scheduler:bindConnection("net_desc_add", game.DescendantAdded:Connect(function(inst)
 		if Scheduler.Status == "RUNNING" then pcall(bindOne, inst) end
@@ -1092,7 +1117,7 @@ local ExportCenter = {}
 
 function ExportCenter:toJSON(): string
 	local data = {
-		Version = "3.2.1-DeltaPatch",
+		Version = "3.2.3-DeltaPatch",
 		Timestamp = os.date("!%Y-%m-%dT%H:%M:%SZ"),
 		PlaceId = game.PlaceId,
 		JobId = game.JobId,
@@ -1121,7 +1146,7 @@ end
 function ExportCenter:toTXT(): string
 	local out = {
 		"==========================================================",
-		" GAMESCANNER DELTA V3.2 — DEEP INSPECTION REPORT",
+		" GAMESCANNER DELTA V3.2.3 — DEEP INSPECTION REPORT",
 		string.format(" PlaceId: %d | UTC: %s", game.PlaceId, os.date("!%Y-%m-%d %H:%M:%S")),
 		"==========================================================",
 		string.format("Nodes: %d | Scripts: %d | Assets: %d | Remotes: %d | Findings: %d | Timeline: %d",
@@ -1143,8 +1168,7 @@ function ExportCenter:toTXT(): string
 				e.Time, e.Category, e.Source, e.Summary, #e.Correlated))
 		end
 	end
-	return table.concat(out, "
-")
+	return table.concat(out, "\n")
 end
 
 function ExportCenter:exportToFile(fmt: string): (boolean, string)
@@ -1154,7 +1178,7 @@ function ExportCenter:exportToFile(fmt: string): (boolean, string)
 	local isTxt = string.upper(fmt) == "TXT"
 	local ext = isTxt and "txt" or "json"
 	local payload = isTxt and self:toTXT() or self:toJSON()
-	local fname = string.format("GameScannerV3_2_%d.%s", game.PlaceId, ext)
+	local fname = string.format("GameScannerV3_2_3_%d.%s", game.PlaceId, ext)
 	local ok, err = pcall(Env.writefile, fname, payload)
 	if ok then
 		Timeline:record("EXPORT_FILE", fname, string.format("Saved %d bytes", #payload))
@@ -1182,6 +1206,9 @@ end
 -- ============================================================================
 local UI = {
 	ScreenGui = nil,
+	DetailLabel = nil,
+	ProgressLabel = nil,
+	RefreshActiveTab = nil,
 	ActiveTab = "Overview",
 	SearchQuery = "",
 	CurrentPage = 1,
@@ -1231,16 +1258,35 @@ local function makeDraggable(keyPrefix: string, dragHandle: GuiObject, targetFra
 	end))
 end
 
+function UI:reportInitError(subsystem: string, errMsg: any)
+	local cleanErr = tostring(errMsg)
+	warn(string.format("[GameScanner][%s] %s", subsystem, cleanErr))
+	Findings:add("HIGH", "InitError", subsystem .. " failed", subsystem, { Error = cleanErr })
+	Timeline:record("INIT_ERROR", subsystem, cleanErr)
+	if self.ProgressLabel then
+		self.ProgressLabel.Text = "Err: " .. string.sub(subsystem, 1, 8)
+		self.ProgressLabel.TextColor3 = Color3.fromRGB(248, 113, 113)
+	end
+	if self.DetailLabel then
+		self.DetailLabel.Text = string.format("[INIT ERROR: %s]\n%s", subsystem, cleanErr)
+	end
+	if self.RefreshActiveTab then
+		pcall(self.RefreshActiveTab)
+	end
+end
+
 function UI:mount()
 	if RunService:IsServer() and not RunService:IsClient() then return end
 	local parent = CompatAdapter.getGuiParent()
 	if not parent then return end
 
-	local old = parent:FindFirstChild("GameScannerDeltaV3_2_1")
-	if old then old:Destroy() end
+	for _, guiName in ipairs({ "GameScannerDeltaV3_2_1", "GameScannerDeltaV3_2_2", "GameScannerDeltaV3_2_3" }) do
+		local old = parent:FindFirstChild(guiName)
+		if old then pcall(old.Destroy, old) end
+	end
 
 	local gui = Instance.new("ScreenGui")
-	gui.Name = "GameScannerDeltaV3_2_1"
+	gui.Name = "GameScannerDeltaV3_2_3"
 	gui.ResetOnSpawn = false
 	gui.IgnoreGuiInset = true
 	gui.ZIndexBehavior = Enum.ZIndexBehavior.Sibling
@@ -1290,7 +1336,7 @@ function UI:mount()
 	titleLbl.TextSize = 11
 	titleLbl.TextColor3 = Color3.fromRGB(110, 231, 183)
 	titleLbl.TextXAlignment = Enum.TextXAlignment.Left
-	titleLbl.Text = "GameScanner Delta V3.2.1 [RUNNING]"
+	titleLbl.Text = "GameScanner Delta V3.2.3 [RUNNING]"
 	titleLbl.Parent = topBar
 
 	local minBtn = Instance.new("TextButton")
@@ -1381,6 +1427,7 @@ function UI:mount()
 	progLbl.TextXAlignment = Enum.TextXAlignment.Left
 	progLbl.Text = "Ready"
 	progLbl.Parent = ctrlBar
+	self.ProgressLabel = progLbl
 
 	-- Tab Strip (10 Tabs)
 	local tabScroll = Instance.new("ScrollingFrame")
@@ -1442,15 +1489,15 @@ function UI:mount()
 	detailText.TextWrapped = true
 	detailText.Text = "Select an item on the left to inspect full details."
 	detailText.Parent = detailFrame
+	self.DetailLabel = detailText
 
 	local function showDetails(title: string, tbl: any)
 		local ok, encoded = pcall(HttpService.JSONEncode, HttpService, safeSerialize(tbl))
-		if ok then
-		local formatted = string.gsub(encoded, ',"', ',\n  "')
-		detailText.Text = "[" .. title .. "]\n" .. formatted
+		if ok and type(encoded) == "string" then
+			local formatted = string.gsub(encoded, ',"', ',\n  "')
+			detailText.Text = "[" .. tostring(title) .. "]\n" .. formatted
 		else
-			detailText.Text = "[" .. title .. "]
-" .. tostring(tbl)
+			detailText.Text = "[" .. tostring(title) .. "]\n" .. tostring(tbl)
 		end
 	end
 
@@ -1749,6 +1796,7 @@ function UI:mount()
 			renderPaginated(rows)
 		end
 	end
+	self.RefreshActiveTab = renderActiveTab
 
 	-- Create 10 Tabs
 	local TABS = { "Overview", "Explorer", "DeepScan", "Runtime", "Scripts", "Network", "Assets", "Timeline", "Findings", "Export" }
@@ -1818,10 +1866,11 @@ function UI:mount()
 	end)
 
 	Scheduler.OnProgress = function(p)
+		progLbl.TextColor3 = Color3.fromRGB(156, 163, 175)
 		progLbl.Text = string.format("%s %d%%", string.sub(p.Label, 1, 8), p.Percent)
 	end
 	Scheduler.OnStatusChange = function(st)
-		titleLbl.Text = string.format("GameScanner Delta V3.2.1 [%s]", st)
+		titleLbl.Text = string.format("GameScanner Delta V3.2.3 [%s]", st)
 	end
 
 	renderActiveTab()
@@ -1831,7 +1880,7 @@ end
 -- [12] BOOTSTRAP & PUBLIC LIFECYCLE API
 -- ============================================================================
 local GameScannerV3_2 = {
-	Version = "3.2.1-DeltaPatch",
+	Version = "3.2.3-DeltaPatch",
 	CompatAdapter = CompatAdapter,
 	Scheduler = Scheduler,
 	Timeline = Timeline,
@@ -1846,8 +1895,7 @@ local GameScannerV3_2 = {
 }
 
 function GameScannerV3_2.start()
-	-- Mount the UI first so a slow/failing initial scan cannot leave the
-	-- executor with no visible window.
+	-- 1. Mount UI first before any scanning or hooking begins.
 	local uiOk, uiErr = pcall(function()
 		UI:mount()
 	end)
@@ -1856,31 +1904,35 @@ function GameScannerV3_2.start()
 		return GameScannerV3_2
 	end
 	if not UI.ScreenGui then
-		warn("[GameScanner] UI was not mounted: no usable GUI parent.")
+		warn("[GameScanner] UI was not mounted: no writable GUI parent found.")
 		return GameScannerV3_2
 	end
 
-	-- Startup tasks are isolated: one failed subsystem must not prevent the
-	-- already-mounted interface from appearing.
+	-- 2. Run initial scan modules safely in isolated pcall blocks and surface
+	-- any initialization failure directly in the UI.
 	local snapshotOk, snapshotErr = pcall(function()
 		DataModelExplorer:takeSnapshot("Initial")
 	end)
 	if not snapshotOk then
-		warn("[GameScanner] Initial snapshot failed: " .. tostring(snapshotErr))
+		UI:reportInitError("InitialSnapshot", snapshotErr)
 	end
 
 	local inventoryOk, inventoryErr = pcall(function()
 		NetworkMonitor:scanRemotes()
 	end)
 	if not inventoryOk then
-		warn("[GameScanner] Initial inventory failed: " .. tostring(inventoryErr))
+		UI:reportInitError("RemoteInventory", inventoryErr)
 	end
 
 	local monitorOk, monitorErr = pcall(function()
 		RuntimeMonitor:start()
 	end)
 	if not monitorOk then
-		warn("[GameScanner] Runtime monitor failed: " .. tostring(monitorErr))
+		UI:reportInitError("RuntimeMonitor", monitorErr)
+	end
+
+	if UI.RefreshActiveTab then
+		pcall(UI.RefreshActiveTab)
 	end
 
 	return GameScannerV3_2
